@@ -113,7 +113,7 @@ static void *receive_thread(void *arg) {
                 continue;
             }
 
-            if (file_size <= 0 || file_size > 10 * 1024 * 1024) {
+            if (file_size <= 0 || file_size > 50 * 1024 * 1024) {
                 printf("\n[Invalid file size]\n> ");
                 fflush(stdout);
                 continue;
@@ -183,8 +183,8 @@ static void send_file(const char *filepath) {
     }
     rewind(fp);
 
-    if (size > 10 * 1024 * 1024) {
-        printf("File too large (max 10 MB)\n");
+    if (size > 50 * 1024 * 1024) {
+        printf("File too large (max 50 MB)\n");
         fclose(fp);
         return;
     }
@@ -263,6 +263,13 @@ int main(void) {
         perror("socket");
         return 1;
     }
+
+    /*
+     * Increase send/receive buffers to 256 KB for faster file transfer.
+     */
+    int bufsize = 256 * 1024;
+    setsockopt(sockfd, SOL_SOCKET, SO_SNDBUF, &bufsize, sizeof(bufsize));
+    setsockopt(sockfd, SOL_SOCKET, SO_RCVBUF, &bufsize, sizeof(bufsize));
 
     struct sockaddr_in server_addr;
     memset(&server_addr, 0, sizeof(server_addr));

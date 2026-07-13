@@ -124,6 +124,11 @@ static void broadcast_line(const char *line, int exclude_index) {
 /*
  * handle_file - Receive file data from one client and broadcast to others.
  * Header format: FILE:username:filename:size
+ *
+ * Speed optimisation: we snapshot the list of active sockets while holding
+ * the mutex, then release the mutex BEFORE the actual send_all() calls.
+ * This means the lock is held for microseconds (just a memcpy of ints)
+ * rather than for the entire slow network transfer.
  */
 static void handle_file(int sender_sock, int sender_index,
                         const char *username, const char *filename,
@@ -131,7 +136,8 @@ static void handle_file(int sender_sock, int sender_index,
     char *file_buffer;
     char header[BUFFER_SIZE];
 
-    if (file_size <= 0 || file_size > 10 * 1024 * 1024) {
+    /* Allow up to 50 MB per transfer */
+    if (file_size <= 0 || file_size > 50 * 1024 * 1024) {
         printf("[Server] Rejected file (invalid size: %ld)\n", file_size);
         return;
     }
@@ -142,7 +148,7 @@ static void handle_file(int sender_sock, int sender_index,
         return;
     }
 
-    printf("[Server] Receiving file '%s' (%ld bytes) from %s\n",
+    printf("[Server] Receiving '%s' (%ld bytes) from %s\n",
            filename, file_size, username);
 
     if (recv_all(sender_sock, file_buffer, (size_t)file_size) < 0) {
@@ -154,24 +160,30 @@ static void handle_file(int sender_sock, int sender_index,
     snprintf(header, sizeof(header), "%s%s:%s:%ld",
              PREFIX_FILE, username, filename, file_size);
 
-    /* Send header line then file bytes to every other client */
+    /*
+     * Snapshot the socket list quickly under the mutex, then release
+     * the lock so other clients are not blocked during the file send.
+     */
+    int target_socks[MAX_CLIENTS];
+    int target_count = 0;
+
     pthread_mutex_lock(&clients_mutex);
-
     for (int i = 0; i < MAX_CLIENTS; i++) {
-        if (!clients[i].active || i == sender_index) {
-            continue;
+        if (clients[i].active && i != sender_index) {
+            target_socks[target_count++] = clients[i].socket;
         }
+    }
+    pthread_mutex_unlock(&clients_mutex);  /* Release BEFORE slow I/O */
 
-        char line[BUFFER_SIZE];
-        snprintf(line, sizeof(line), "%s\n", header);
-        send(clients[i].socket, line, strlen(line), 0);
-        send_all(clients[i].socket, file_buffer, (size_t)file_size);
+    /* Now send without holding the mutex */
+    char line[BUFFER_SIZE];
+    snprintf(line, sizeof(line), "%s\n", header);
+    for (int i = 0; i < target_count; i++) {
+        send(target_socks[i], line, strlen(line), 0);
+        send_all(target_socks[i], file_buffer, (size_t)file_size);
     }
 
-    pthread_mutex_unlock(&clients_mutex);
-
-    pthread_mutex_unlock(&clients_mutex);
-
+    printf("[Server] Sent '%s' to %d client(s)\n", filename, target_count);
     free(file_buffer);
 }
 
@@ -289,6 +301,14 @@ int main(void) {
     /* Allow quick restart after server stops (reuse port immediately) */
     int opt = 1;
     setsockopt(server_fd, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt));
+
+    /*
+     * Increase send/receive buffers to 256 KB for faster file transfer.
+     * The OS uses these buffers to pipeline data without waiting for ACKs.
+     */
+    int bufsize = 256 * 1024;
+    setsockopt(server_fd, SOL_SOCKET, SO_SNDBUF, &bufsize, sizeof(bufsize));
+    setsockopt(server_fd, SOL_SOCKET, SO_RCVBUF, &bufsize, sizeof(bufsize));
 
     memset(&server_addr, 0, sizeof(server_addr));
     server_addr.sin_family = AF_INET;
