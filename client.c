@@ -61,6 +61,33 @@ static void save_received_file(const char *filename, const char *data, size_t si
 }
 
 /*
+ * readline - Read exactly one '\n'-terminated line from the socket.
+ *
+ * This reads ONE byte at a time so we never accidentally consume bytes
+ * that belong to the binary file data that immediately follows a FILE
+ * header line.  Returns the number of bytes placed in buf (excluding \0),
+ * or -1 on disconnect / error.
+ *
+ * Why byte-by-byte?  TCP is a stream: a single recv() can return the
+ * header *and* the first chunk of file data in one call.  If we used a
+ * large recv() buffer we would lose those file bytes.
+ */
+static int readline(int sock, char *buf, size_t maxlen) {
+    size_t i = 0;
+    while (i < maxlen - 1) {
+        char c;
+        ssize_t n = recv(sock, &c, 1, 0);
+        if (n <= 0) return -1;  /* disconnected or error */
+        if (c == '\n') break;   /* end of header line */
+        if (c != '\r') {        /* skip carriage return */
+            buf[i++] = c;
+        }
+    }
+    buf[i] = '\0';
+    return (int)i;
+}
+
+/*
  * receive_thread - Background thread: read messages and files from server.
  */
 static void *receive_thread(void *arg) {
@@ -68,20 +95,16 @@ static void *receive_thread(void *arg) {
     char line[BUFFER_SIZE];
 
     while (running) {
-        ssize_t n = recv(sockfd, line, sizeof(line) - 1, 0);
-        if (n <= 0) {
+        /*
+         * Use readline() instead of recv() so we read exactly one header
+         * line and never spill into the binary file bytes that follow.
+         */
+        if (readline(sockfd, line, sizeof(line)) < 0) {
             if (running) {
                 printf("\n[Disconnected from server]\n");
             }
             running = 0;
             break;
-        }
-
-        line[n] = '\0';
-
-        size_t len = strlen(line);
-        while (len > 0 && (line[len - 1] == '\n' || line[len - 1] == '\r')) {
-            line[--len] = '\0';
         }
 
         if (strncmp(line, PREFIX_MSG, strlen(PREFIX_MSG)) == 0) {
