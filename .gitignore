@@ -1,0 +1,5 @@
+server
+client
+*.o
+recv_*
+.DS_Store
