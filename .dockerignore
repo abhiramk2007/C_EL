@@ -1,0 +1,6 @@
+# Exclude compiled macOS binaries so Docker recompiles for Linux
+server
+client
+recv_*
+.git
+*.o
